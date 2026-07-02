@@ -1132,6 +1132,7 @@ if(currentPage == "Notification filters") {
 let count = 0;
 let torrents = document.querySelectorAll("tr.torrent");
 let nseBackfillNextURL = null;
+let nseHiddenTorrentsToggled = false;
 
 if(currentPage == "Requests") {
     torrents = document.querySelectorAll("#request_table tr");
@@ -2293,6 +2294,8 @@ document.getElementById("nseReloadButton").onclick = function() { location.reloa
 // | Functions |
 // +-----------+
 function toggleTorrents() {
+    nseHiddenTorrentsToggled = !nseHiddenTorrentsToggled;
+
     for(let k = 0; k < torrents.length; k++) {
         torrents[k].classList.toggle("hidden");
     }
@@ -2406,6 +2409,18 @@ function markBackfilledPagerLinks(loadedURLs) {
         if(loadedURLSet.has(pageURL)) {
             pageLinks[i].classList.add("nseBackfilledPagerPage");
         }
+    }
+}
+
+function applyCurrentTorrentToggleState(row) {
+    if(!nseHiddenTorrentsToggled) {
+        return;
+    }
+
+    if(row.getAttribute("isNSEHidden") === "1") {
+        row.classList.remove("hidden");
+    } else {
+        row.classList.add("hidden");
     }
 }
 
@@ -2937,6 +2952,7 @@ function processBackfilledTorrentRows(rows) {
 
         addBackfilledRCMHandlers(row);
         applyBackfilledCategoryHiding(row);
+        applyCurrentTorrentToggleState(row);
 
         if(nseHardPassEnabled && nseRemoveHardPassResults && row.classList.contains("nseHardPassRemove")) {
             row.remove();
@@ -2951,7 +2967,6 @@ async function backfillResults() {
     let targetTable = document.querySelector("#torrent_table tbody") || document.querySelector("#torrent_table");
     let nextURL = nseBackfillNextURL || getBackfillNextURL(document);
     let pagesLoaded = 0;
-    let hiddenAdded = 0;
     let loadedURLs = [];
     let existingTorrentIDs = new Set();
     let existingRows = document.querySelectorAll("#torrent_table tr.torrent");
@@ -3006,7 +3021,11 @@ async function backfillResults() {
                 break;
             }
 
-            hiddenAdded += processBackfilledTorrentRows(appendedRows);
+            let pageHiddenCount = processBackfilledTorrentRows(appendedRows);
+            if(pageHiddenCount !== 0) {
+                count += pageHiddenCount;
+                adjustHiddenHeaderCount(pageHiddenCount);
+            }
             loadedURLs.push(currentURL);
             markBackfilledPagerLinks([currentURL]);
             pagesLoaded++;
@@ -3015,11 +3034,6 @@ async function backfillResults() {
 
         updateBackfillNextURL(nextURL);
         torrents = document.querySelectorAll("tr.torrent");
-
-        if(hiddenAdded !== 0) {
-            count += hiddenAdded;
-            adjustHiddenHeaderCount(hiddenAdded);
-        }
 
         if(pagesLoaded === 0) {
             setBackfillStatus("No results loaded");

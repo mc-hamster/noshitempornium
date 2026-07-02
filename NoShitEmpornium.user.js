@@ -2363,6 +2363,26 @@ function getBackfillNextURL(sourceDocument) {
     return new URL(nextLink.getAttribute("href"), window.location.href).href;
 }
 
+function getBackfillNextPagerURLAfter(currentURL) {
+    let currentAbsoluteURL = new URL(currentURL, window.location.href).href;
+    let pageLinks = document.querySelectorAll("a.pager_page");
+
+    for(let i = 0; i < pageLinks.length; i++) {
+        let pageURL = new URL(pageLinks[i].getAttribute("href"), window.location.href).href;
+
+        if(pageURL == currentAbsoluteURL) {
+            for(let j = i + 1; j < pageLinks.length; j++) {
+                let nextPageURL = new URL(pageLinks[j].getAttribute("href"), window.location.href).href;
+                if(!pageLinks[j].classList.contains("nseBackfilledPagerPage")) {
+                    return nextPageURL;
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
 function updateBackfillNextURL(nextURL) {
     nseBackfillNextURL = nextURL;
 
@@ -2990,7 +3010,7 @@ async function backfillResults() {
             loadedURLs.push(currentURL);
             markBackfilledPagerLinks([currentURL]);
             pagesLoaded++;
-            nextURL = getBackfillNextURL(fetchedDocument);
+            nextURL = getBackfillNextURL(fetchedDocument) || getBackfillNextPagerURLAfter(currentURL);
         }
 
         updateBackfillNextURL(nextURL);

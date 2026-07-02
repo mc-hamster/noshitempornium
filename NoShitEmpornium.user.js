@@ -175,6 +175,16 @@ let nseFloatingToggleButtonEnabled = GM_getValue("nseFloatingToggleButtonEnabled
 let nseOpenAllButtonEnabled = GM_getValue("nseOpenAllButtonEnabled", true);
 let nseOpenAllGoNextEnabled = GM_getValue("nseOpenAllGoNextEnabled", false);
 
+//   Backfill results button
+let nseBackfillButtonEnabled = GM_getValue("nseBackfillButtonEnabled", true);
+let nseBackfillPageLimit = Number(GM_getValue("nseBackfillPageLimit", 5));
+if(isNaN(nseBackfillPageLimit) || nseBackfillPageLimit < 1) {
+    nseBackfillPageLimit = 5;
+} else if(nseBackfillPageLimit > 15) {
+    nseBackfillPageLimit = 15;
+}
+nseBackfillPageLimit = Math.floor(nseBackfillPageLimit);
+
 //   Fonts
 let nseUIFont = GM_getValue("nseUIFont", "Helvetica");
 let nseTextAreaFont = GM_getValue("nseTextAreaFont", "Monospace");
@@ -432,6 +442,7 @@ htmlContent.innerHTML = `
     <div id="nseHeader">
         <span id="nseHeaderText">NoShitEmpornium</span>
         <span id="nseToggleOptionsNode" class="nseNiceButton">Options</span><span id="nseDynamicRefreshNode" class="nseNiceButton hidden" title="Reload the page to apply your changes" onclick="javascript:location.reload();">🗘</span>
+        ${currentPage == "Torrents" && nseBackfillButtonEnabled ? `<span id="nseBackfillButton" class="nseNiceButton"><span class="nseEmoji">🔁</span> Backfill results</span><span id="nseBackfillStatus" class="nseExplanationSpan"></span>` : ''}
     </div>
     <div id="nseMainDiv" class="nseMainBox hidden">
         <input class="nseRadioButton" id="nseTab1" type="radio" name="tabs" checked>
@@ -819,7 +830,16 @@ htmlContent.innerHTML = `
                     <input type="checkbox" id="nseCheckOpenAllGoNext"${nseOpenAllGoNextEnabled ? ' checked' : ''} />
                     <label for="nseCheckOpenAllGoNext" class="nseSettingsCheckbox">
                         <span class="nseEmoji">➡️</span> Automatically go to next results page after clicking "Open all" button
-                    </label><br /><br />
+                    </label><br />
+
+                    <input type="checkbox" id="nseCheckBackfillButton"${nseBackfillButtonEnabled ? ' checked' : ''} />
+                    <label for="nseCheckBackfillButton" class="nseSettingsCheckbox">
+                        <span class="nseEmoji">🔁</span> Enable the "Backfill results" button on torrent lists
+                    </label><br />
+                    <span class="nseExplanationSpan nseESOffset">(Fetches additional torrent result pages and applies NSE filtering to them)</span><br />
+
+                    Pages to backfill per click: <br />
+                    <input type="text" class="nseInput" style="width: 50px;" value="${nseBackfillPageLimit}" id="nseBackfillPageLimit" /> <span class="nseExplanationSpan">(1-15, default 5)</span><br /><br />
 
                     <br />
 
@@ -1111,6 +1131,7 @@ if(currentPage == "Notification filters") {
 // +---------------------+
 let count = 0;
 let torrents = document.querySelectorAll("tr.torrent");
+let nseBackfillNextURL = null;
 
 if(currentPage == "Requests") {
     torrents = document.querySelectorAll("#request_table tr");
@@ -2152,6 +2173,15 @@ if(nseOpenAllButtonEnabled && !nseUnfilteredPages.includes(currentPage)) {
     };
 }
 
+if(nseBackfillButtonEnabled && currentPage == "Torrents") {
+    nseBackfillNextURL = getBackfillNextURL(document);
+    if(!nseBackfillNextURL) {
+        disableBackfillButton("No more pages");
+    } else {
+        document.getElementById("nseBackfillButton").onclick = function() { backfillResults(); };
+    }
+}
+
 if(nseFilterAllButtonEnabled && nseIndividualUploadHidingEnabled && !nseUnfilteredPages.includes(currentPage)) {
     document.getElementById("nseFilterAllButton").onclick = function() {
         if(confirm(`Are you sure you want to filter all unfiltered results on this page?\n\nThis cannot be automatically undone, and you will have to manually unhide each torrent to undo it.`)) {
@@ -2308,6 +2338,685 @@ function adjustHiddenHeaderCount(value) {
         headerNode.innerHTML = "Toggle 1 hidden torrent";
     } else {
         headerNode.innerHTML = "Toggle " + currNum + " hidden torrents";
+    }
+}
+
+function getBackfillPageLimit() {
+    let pageLimit = Number(GM_getValue("nseBackfillPageLimit", nseBackfillPageLimit));
+
+    if(isNaN(pageLimit) || pageLimit < 1) {
+        pageLimit = 5;
+    } else if(pageLimit > 15) {
+        pageLimit = 15;
+    }
+
+    return Math.floor(pageLimit);
+}
+
+function getBackfillNextURL(sourceDocument) {
+    let nextLink = sourceDocument.querySelector(".pager_next");
+
+    if(!nextLink) {
+        return null;
+    }
+
+    return new URL(nextLink.getAttribute("href"), window.location.href).href;
+}
+
+function updateBackfillNextURL(nextURL) {
+    nseBackfillNextURL = nextURL;
+
+    if(nextURL) {
+        let nextLinks = document.querySelectorAll(".pager_next");
+        for(let i = 0; i < nextLinks.length; i++) {
+            nextLinks[i].href = nextURL;
+        }
+    }
+}
+
+function markBackfilledPagerLinks(loadedURLs) {
+    let loadedURLSet = new Set();
+    for(let i = 0; i < loadedURLs.length; i++) {
+        loadedURLSet.add(new URL(loadedURLs[i], window.location.href).href);
+    }
+
+    let pageLinks = document.querySelectorAll("a.pager_page");
+    for(let i = 0; i < pageLinks.length; i++) {
+        let pageURL = new URL(pageLinks[i].getAttribute("href"), window.location.href).href;
+        if(loadedURLSet.has(pageURL)) {
+            pageLinks[i].classList.add("nseBackfilledPagerPage");
+        }
+    }
+}
+
+function setBackfillStatus(statusText) {
+    let statusNode = document.getElementById("nseBackfillStatus");
+    if(statusNode) {
+        statusNode.textContent = statusText ? " " + statusText : "";
+    }
+}
+
+function setBackfillButtonBusy(isBusy) {
+    let button = document.getElementById("nseBackfillButton");
+    if(button) {
+        if(isBusy) {
+            button.classList.add("nseDisabledButton");
+        } else {
+            button.classList.remove("nseDisabledButton");
+        }
+    }
+}
+
+function disableBackfillButton(statusText) {
+    let button = document.getElementById("nseBackfillButton");
+    if(button) {
+        button.classList.add("nseDisabledButton");
+        button.onclick = null;
+    }
+    setBackfillStatus(statusText);
+}
+
+function getTorrentIDFromTitleElement(titleElement) {
+    if(!titleElement || !titleElement.href) {
+        return null;
+    }
+
+    let torrentID = titleElement.href.match(/id=([0-9]+)/);
+    if(!torrentID) {
+        return null;
+    }
+
+    return torrentID[1];
+}
+
+function getTorrentIDFromRow(row) {
+    let titleElement = row.querySelector("td > a[href*='id=']");
+    return getTorrentIDFromTitleElement(titleElement);
+}
+
+function executeBackfilledRowScripts(row) {
+    let scripts = row.querySelectorAll("script");
+    for(let i = 0; i < scripts.length; i++) {
+        let executableScript = document.createElement("script");
+        executableScript.textContent = scripts[i].textContent;
+        scripts[i].parentNode.replaceChild(executableScript, scripts[i]);
+    }
+}
+
+function addBackfilledIndividualHideButton(row, titleElement, russianRouletteBulletInChamber) {
+    let status = {
+        currentHidden: false,
+        currentWhitelisted: false,
+        currentForceHide: false,
+        currentForceShow: false
+    };
+
+    if(!nseIndividualUploadHidingEnabled || row.querySelector(".nseToggleIcon")) {
+        return status;
+    }
+
+    let torrentIconContainer = row.querySelector("td > span.torrent_icon_container");
+    let torrentID = getTorrentIDFromTitleElement(titleElement);
+
+    if(!torrentIconContainer || !torrentID) {
+        return status;
+    }
+
+    let nseToggleHideElement = document.createElement("span");
+    nseToggleHideElement.className = "icon nseToggleHideButton";
+    nseToggleHideElement.title = "Filter this torrent with NSE";
+
+    let iconContainer = document.createElement("div");
+    iconContainer.className = "icon_container";
+
+    let iconStack = document.createElement("div");
+    iconStack.className = "icon_stack";
+
+    let actualIcon = document.createElement("i");
+    actualIcon.className = "font_icon torrent_icons clickable nseToggleIcon";
+    actualIcon.torrentID = torrentID;
+
+    let iconImage = document.querySelector(".nseToggleIcon img");
+    if(iconImage) {
+        let image = document.createElement("img");
+        image.src = iconImage.src;
+        actualIcon.appendChild(image);
+    } else {
+        actualIcon.textContent = nseEmojiEnabled ? "👁" : "NSE";
+    }
+
+    actualIcon.onclick = function() {
+        let torrentParent = this.closest("tr.torrent");
+
+        nseIndividualUploadHidingBlacklist = GM_getValue("nseIndividualUploadHidingBlacklist", new Array(0));
+        nseIndividualUploadHidingWhitelist = GM_getValue("nseIndividualUploadHidingWhitelist", new Array(0));
+
+        if(torrentParent) {
+            if(!torrentParent.getAttribute("isNSEHidden")) {
+                torrentParent.setAttribute("isNSEHidden", "0");
+            }
+
+            if(torrentParent.getAttribute("isNSEHidden") === "1") {
+                let currindex = nseIndividualUploadHidingBlacklist.indexOf(this.torrentID);
+                if(currindex > -1) {
+                    nseIndividualUploadHidingBlacklist.splice(currindex, 1);
+                }
+
+                currindex = nseIndividualUploadHidingWhitelist.indexOf(this.torrentID);
+                if(currindex == -1) {
+                    nseIndividualUploadHidingWhitelist.push(this.torrentID);
+                }
+
+                torrentParent.classList.remove("hidden");
+                torrentParent.setAttribute("isNSEHidden", "0");
+                torrentParent.style.backgroundColor = null;
+
+                this.classList.add("nseIndividuallyWhitelisted");
+                this.classList.remove("nseIndividuallyBlacklisted");
+                this.classList.remove("nseIndividuallyUntouched");
+
+                adjustHiddenHeaderCount(-1);
+            } else if(torrentParent.getAttribute("isNSEHidden") === "0") {
+                let currindex = nseIndividualUploadHidingWhitelist.indexOf(this.torrentID);
+                if(currindex > -1) {
+                    nseIndividualUploadHidingWhitelist.splice(currindex, 1);
+                }
+
+                currindex = nseIndividualUploadHidingBlacklist.indexOf(this.torrentID);
+                if(currindex == -1) {
+                    nseIndividualUploadHidingBlacklist.push(this.torrentID);
+                }
+
+                torrentParent.classList.add("hidden");
+                torrentParent.setAttribute("isNSEHidden", "1");
+                torrentParent.style.backgroundColor = themes[nseSelectedTheme].hiddenBackgroundColor;
+
+                this.classList.remove("nseIndividuallyWhitelisted");
+                this.classList.remove("nseIndividuallyUntouched");
+                this.classList.add("nseIndividuallyBlacklisted");
+
+                adjustHiddenHeaderCount(1);
+            }
+
+            GM_setValue("nseIndividualUploadHidingBlacklist", nseIndividualUploadHidingBlacklist);
+            GM_setValue("nseIndividualUploadHidingWhitelist", nseIndividualUploadHidingWhitelist);
+        }
+    };
+
+    actualIcon.addEventListener('contextmenu', function(event) {
+        event.preventDefault();
+
+        let torrentParent = this.closest("tr.torrent");
+
+        nseIndividualUploadHidingBlacklist = GM_getValue("nseIndividualUploadHidingBlacklist", new Array(0));
+        nseIndividualUploadHidingWhitelist = GM_getValue("nseIndividualUploadHidingWhitelist", new Array(0));
+
+        if(torrentParent) {
+            let wasRemovedFromWL = false;
+            let wasRemovedFromBL = false;
+
+            let currindex = nseIndividualUploadHidingWhitelist.indexOf(this.torrentID);
+            if(currindex > -1) {
+                nseIndividualUploadHidingWhitelist.splice(currindex, 1);
+                wasRemovedFromWL = true;
+            }
+
+            currindex = nseIndividualUploadHidingBlacklist.indexOf(this.torrentID);
+            if(currindex > -1) {
+                nseIndividualUploadHidingBlacklist.splice(currindex, 1);
+                wasRemovedFromBL = true;
+            }
+
+            if(wasRemovedFromWL || wasRemovedFromBL) {
+                if(wasRemovedFromBL && torrentParent.getAttribute("isNSEHidden") === "1") {
+                    torrentParent.classList.remove("hidden");
+                    torrentParent.setAttribute("isNSEHidden", "0");
+                    torrentParent.style.backgroundColor = null;
+                    adjustHiddenHeaderCount(-1);
+                }
+
+                this.classList.remove("nseIndividuallyWhitelisted");
+                this.classList.remove("nseIndividuallyBlacklisted");
+                this.classList.add("nseIndividuallyUntouched");
+
+                GM_setValue("nseIndividualUploadHidingBlacklist", nseIndividualUploadHidingBlacklist);
+                GM_setValue("nseIndividualUploadHidingWhitelist", nseIndividualUploadHidingWhitelist);
+            }
+        }
+    }, false);
+
+    iconStack.appendChild(actualIcon);
+    iconContainer.appendChild(iconStack);
+    nseToggleHideElement.appendChild(iconContainer);
+    torrentIconContainer.appendChild(nseToggleHideElement);
+
+    let currentBLIndex = nseIndividualUploadHidingBlacklist.indexOf(torrentID);
+    if(currentBLIndex > -1) {
+        if(russianRouletteBulletInChamber == false) {
+            actualIcon.classList.add("nseIndividuallyBlacklisted");
+            status.currentHidden = true;
+            status.currentForceHide = true;
+        }
+    }
+
+    let currentWLIndex = nseIndividualUploadHidingWhitelist.indexOf(torrentID);
+    if(currentWLIndex > -1) {
+        actualIcon.classList.add("nseIndividuallyWhitelisted");
+        status.currentWhitelisted = true;
+        status.currentForceShow = true;
+    }
+
+    if(status.currentForceHide == false && status.currentForceShow == false) {
+        actualIcon.classList.add("nseIndividuallyUntouched");
+    }
+
+    return status;
+}
+
+function addBackfilledRCMHandlers(row) {
+    if(!nseRightClickManagementEnabled) {
+        return;
+    }
+
+    if(nseRCMTagsEnabled) {
+        let tagList = row.querySelectorAll("td > div.tags > a");
+        if(tagList !== null && tagList !== undefined) {
+            for(let i = 0; i < tagList.length; i++) {
+                tagList[i].classList.add("nseTagElement");
+                tagList[i].addEventListener('contextmenu', function(event) {
+                    event.preventDefault();
+                    showRCMBox("tag", this.innerHTML.trim(), event.pageX, event.pageY);
+                }, false);
+            }
+        }
+    }
+
+    if(nseRCMTitlesEnabled) {
+        let titleElement = row.querySelector("td > a");
+        if(titleElement) {
+            titleElement.classList.add("nseTitleElement");
+            titleElement.addEventListener('contextmenu', function(event) {
+                event.preventDefault();
+
+                let currTitle = this.innerHTML;
+                let colorIndex = currTitle.indexOf("<color");
+
+                if(colorIndex != -1) {
+                    currTitle = currTitle.substring(0, colorIndex);
+                }
+
+                showRCMBox("title", currTitle.trim(), event.pageX, event.pageY);
+            }, false);
+        }
+    }
+
+    if(nseRCMUploadersEnabled) {
+        let uploaderElement = row.querySelector("td.user > a");
+        if(uploaderElement) {
+            uploaderElement.classList.add("nseUploaderElement");
+            uploaderElement.addEventListener('contextmenu', function(event) {
+                event.preventDefault();
+                showRCMBox("uploader", this.innerHTML.trim(), event.pageX, event.pageY);
+            }, false);
+        }
+    }
+}
+
+function applyBackfilledCategoryHiding(row) {
+    if(nseHideCategoryIconsEnabled) {
+        let catsCol = row.querySelector(".cats_col");
+        if(catsCol && catsCol.nextElementSibling) {
+            catsCol.nextElementSibling.setAttribute("colspan", "2");
+            catsCol.style.display = "none";
+        }
+    }
+}
+
+function processBackfilledTorrentRows(rows) {
+    let hiddenCount = 0;
+
+    for(let i = 0; i < rows.length; i++) {
+        let row = rows[i];
+        executeBackfilledRowScripts(row);
+
+        let tagElement = row.querySelector("td > div.tags");
+        if(!tagElement) {
+            continue;
+        }
+
+        let titleElement = row.querySelector("td > a");
+        if(!titleElement) {
+            continue;
+        }
+
+        let russianRouletteBulletInChamber = false;
+        if(nseRussianRouletteEnabled) {
+            let randNum = Math.floor(Math.random() * 6) + 1;
+            if(randNum == 6) {
+                russianRouletteBulletInChamber = true;
+            }
+        }
+
+        let uploaderElement = row.querySelector("td.user > a");
+        let countMe = 1;
+        let individualStatus = addBackfilledIndividualHideButton(row, titleElement, russianRouletteBulletInChamber);
+        let currentHidden = individualStatus.currentHidden;
+        let currentWhitelisted = individualStatus.currentWhitelisted;
+        let currentBypassWhitelist = false;
+        let currentForceHide = individualStatus.currentForceHide;
+        let currentForceShow = individualStatus.currentForceShow;
+
+        if(nseObliviousModeEnabled == true) {
+            tagElement.classList.add("hidden");
+        }
+
+        if(nseHideReportedEnabled) {
+            if(titleElement.querySelector("span.reported") !== null) {
+                currentHidden = true;
+            }
+        }
+
+        if(nseHideWarnedEnabled) {
+            if(row.classList.contains("redbar")) {
+                currentHidden = true;
+            }
+        }
+
+        if(nseHideUnseededEnabled) {
+            let seeders = row.querySelector("td:nth-child(8)");
+            if(seeders && seeders.classList.contains("r00")) {
+                currentHidden = true;
+                seeders.innerHTML = "(0)";
+            }
+        }
+
+        let torrentIconElement = row.querySelector("td > span.torrent_icon_container > span.icon > a > div.icon_container > div.icon_stack > i");
+        if(torrentIconElement) {
+            if(nseHideSnatchedEnabled && torrentIconElement.classList.contains("snatched")) {
+                currentHidden = true;
+                if(nseBypassWhitelistsEnabled) {
+                    currentBypassWhitelist = true;
+                }
+            }
+
+            if(nseHideSeedingEnabled && torrentIconElement.classList.contains("seeding")) {
+                currentHidden = true;
+                if(nseBypassWhitelistsEnabled) {
+                    currentBypassWhitelist = true;
+                }
+            }
+
+            if(nseHideGrabbedEnabled && torrentIconElement.classList.contains("grabbed")) {
+                currentHidden = true;
+                if(nseBypassWhitelistsEnabled) {
+                    currentBypassWhitelist = true;
+                }
+            }
+
+            if(nseHideLeechingEnabled && torrentIconElement.classList.contains("leeching")) {
+                currentHidden = true;
+                if(nseBypassWhitelistsEnabled) {
+                    currentBypassWhitelist = true;
+                }
+            }
+        }
+
+        if(nseHideBookmarkedEnabled) {
+            let bmElement = row.querySelector("i.bookmarked");
+            if(bmElement) {
+                currentHidden = true;
+                if(nseBypassWhitelistsEnabled) {
+                    currentBypassWhitelist = true;
+                }
+            }
+        }
+
+        if(!uploaderElement) {
+            if(nseHideAnonUploadsEnabled) {
+                let anonName = row.querySelector("td > span.anon_name");
+                if(anonName && anonName.innerHTML == "anon") {
+                    currentHidden = true;
+                    if(russianRouletteBulletInChamber == false) {
+                        anonName.classList.add("nseHiddenUploader");
+                    }
+                }
+            }
+        } else {
+            let uploader = uploaderElement.innerHTML.trim().toLowerCase();
+            let hiddenByUploader = false;
+
+            for(let l = 0; l < nseBlacklistUploaders.length; l++) {
+                if(uploader == nseBlacklistUploaders[l].trim().toLowerCase()) {
+                    hiddenByUploader = true;
+                    currentHidden = true;
+                    if(russianRouletteBulletInChamber == false) {
+                        uploaderElement.classList.add("nseHiddenUploader");
+                    }
+                    break;
+                }
+            }
+
+            if(hiddenByUploader == false) {
+                if(currentBypassWhitelist == false) {
+                    for(let m = 0; m < nseWhitelistUploaders.length; m++) {
+                        if(uploader == nseWhitelistUploaders[m].trim().toLowerCase()) {
+                            currentWhitelisted = true;
+                            uploaderElement.classList.add("nseWhitelistedUploader");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        for(let tblCount = 0; tblCount < nseBlacklistTitlePhrases.length; tblCount++) {
+            let currentTBLPhrase = nseBlacklistTitlePhrases[tblCount].trim().toLowerCase();
+            let torrentTitle = titleElement.innerHTML.trim().toLowerCase();
+
+            if(currentTBLPhrase != "") {
+                if(torrentTitle.includes(currentTBLPhrase)) {
+                    currentHidden = true;
+                    if(russianRouletteBulletInChamber == false) {
+                        titleElement.innerHTML = titleElement.innerHTML + ` <color class="nseHiddenTitle">(${currentTBLPhrase})</color>`;
+                    }
+                }
+            }
+        }
+
+        if(nseHardPassEnabled) {
+            for(let tblCount = 0; tblCount < nseHardPassTitlePhrases.length; tblCount++) {
+                let currentTBLPhrase = nseHardPassTitlePhrases[tblCount].trim().toLowerCase();
+                let torrentTitle = titleElement.innerHTML.trim().toLowerCase();
+
+                if(currentTBLPhrase != "") {
+                    if(torrentTitle.includes(currentTBLPhrase)) {
+                        currentHidden = true;
+                        currentForceHide = true;
+                        if(russianRouletteBulletInChamber == false) {
+                            titleElement.innerHTML = titleElement.innerHTML + ` <color class="nseHardPassTitle">(${currentTBLPhrase})</color>`;
+
+                            if(nseRemoveHardPassResults) {
+                                row.classList.add("nseHardPassRemove");
+                                countMe = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if(currentBypassWhitelist == false) {
+            for(let tblCount = 0; tblCount < nseWhitelistTitlePhrases.length; tblCount++) {
+                let currentTWLPhrase = nseWhitelistTitlePhrases[tblCount].trim().toLowerCase();
+                let torrentTitle = titleElement.innerHTML.trim().toLowerCase();
+
+                if(currentTWLPhrase != "") {
+                    if(torrentTitle.includes(currentTWLPhrase)) {
+                        currentWhitelisted = true;
+                        titleElement.innerHTML = titleElement.innerHTML + ` <color class="nseWhitelistedTitle">(${currentTWLPhrase})</color>`;
+                    }
+                }
+            }
+        }
+
+        let tagList = tagElement.querySelectorAll("a");
+        if(tagList) {
+            for(let k = 0; k < tagList.length; k++) {
+                if(nseHardPassEnabled) {
+                    if(nseHardPassTags.includes(tagList[k].innerHTML) === true) {
+                        currentHidden = true;
+                        currentForceHide = true;
+                        if(russianRouletteBulletInChamber == false) {
+                            tagList[k].classList.add("nseHardPassTag");
+
+                            if(nseRemoveHardPassResults) {
+                                row.classList.add("nseHardPassRemove");
+                                countMe = 0;
+                            }
+                        }
+                    }
+                }
+
+                if(nseBlacklistTags.includes(tagList[k].innerHTML) === true) {
+                    currentHidden = true;
+                    if(russianRouletteBulletInChamber == false) {
+                        tagList[k].classList.add("nseHiddenTag");
+                    }
+                }
+
+                if(currentBypassWhitelist == false) {
+                    if(nseWhitelistTags.includes(tagList[k].innerHTML) === true) {
+                        currentWhitelisted = true;
+                        tagList[k].classList.add("nseWhitelistedTag");
+                    }
+                }
+            }
+        }
+
+        if(currentForceShow) {
+            currentHidden = false;
+            currentWhitelisted = true;
+        } else if(currentForceHide) {
+            currentHidden = true;
+            currentWhitelisted = false;
+        }
+
+        if(currentWhitelisted === true) {
+            row.classList.remove("hidden");
+            row.setAttribute("isNSEHidden", "0");
+        } else if(currentHidden === true) {
+            if(russianRouletteBulletInChamber == false) {
+                row.style.backgroundColor = themes[nseSelectedTheme].hiddenBackgroundColor;
+                row.classList.add("hidden");
+                row.setAttribute("isNSEHidden", "1");
+                hiddenCount += countMe;
+            }
+        } else {
+            row.setAttribute("isNSEHidden", "0");
+        }
+
+        addBackfilledRCMHandlers(row);
+        applyBackfilledCategoryHiding(row);
+
+        if(nseHardPassEnabled && nseRemoveHardPassResults && row.classList.contains("nseHardPassRemove")) {
+            row.remove();
+        }
+    }
+
+    return hiddenCount;
+}
+
+async function backfillResults() {
+    let pageLimit = getBackfillPageLimit();
+    let targetTable = document.querySelector("#torrent_table tbody") || document.querySelector("#torrent_table");
+    let nextURL = nseBackfillNextURL || getBackfillNextURL(document);
+    let pagesLoaded = 0;
+    let hiddenAdded = 0;
+    let loadedURLs = [];
+    let existingTorrentIDs = new Set();
+    let existingRows = document.querySelectorAll("#torrent_table tr.torrent");
+
+    if(!targetTable) {
+        setBackfillStatus("Could not find torrent table");
+        return;
+    }
+
+    if(!nextURL) {
+        disableBackfillButton("No more pages");
+        return;
+    }
+
+    for(let i = 0; i < existingRows.length; i++) {
+        let torrentID = getTorrentIDFromRow(existingRows[i]);
+        if(torrentID) {
+            existingTorrentIDs.add(torrentID);
+        }
+    }
+
+    setBackfillButtonBusy(true);
+
+    try {
+        for(let pageCount = 0; pageCount < pageLimit && nextURL; pageCount++) {
+            setBackfillStatus("Loading page " + (pageCount + 1) + " of " + pageLimit + "...");
+            let currentURL = nextURL;
+
+            let response = await fetch(currentURL, { credentials: "same-origin" });
+            if(!response.ok) {
+                throw new Error("Failed to fetch " + currentURL);
+            }
+
+            let html = await response.text();
+            let fetchedDocument = new DOMParser().parseFromString(html, "text/html");
+            let fetchedRows = fetchedDocument.querySelectorAll("#torrent_table tr.torrent");
+            let appendedRows = [];
+
+            for(let rowCount = 0; rowCount < fetchedRows.length; rowCount++) {
+                let torrentID = getTorrentIDFromRow(fetchedRows[rowCount]);
+
+                if(torrentID && !existingTorrentIDs.has(torrentID)) {
+                    let importedRow = document.importNode(fetchedRows[rowCount], true);
+                    targetTable.appendChild(importedRow);
+                    appendedRows.push(importedRow);
+                    existingTorrentIDs.add(torrentID);
+                }
+            }
+
+            if(appendedRows.length === 0) {
+                nextURL = null;
+                break;
+            }
+
+            hiddenAdded += processBackfilledTorrentRows(appendedRows);
+            loadedURLs.push(currentURL);
+            markBackfilledPagerLinks([currentURL]);
+            pagesLoaded++;
+            nextURL = getBackfillNextURL(fetchedDocument);
+        }
+
+        updateBackfillNextURL(nextURL);
+        torrents = document.querySelectorAll("tr.torrent");
+
+        if(hiddenAdded !== 0) {
+            count += hiddenAdded;
+            adjustHiddenHeaderCount(hiddenAdded);
+        }
+
+        if(pagesLoaded === 0) {
+            setBackfillStatus("No results loaded");
+        } else {
+            setBackfillStatus("");
+        }
+
+        if(!nseBackfillNextURL) {
+            disableBackfillButton("No more pages");
+        }
+    } catch(error) {
+        console.error(error);
+        setBackfillStatus("Backfill failed");
+    } finally {
+        if(nseBackfillNextURL) {
+            setBackfillButtonBusy(false);
+        }
     }
 }
 
@@ -2884,6 +3593,7 @@ function saveData() {
         nseFloatingToggleButtonEnabled: "nseCheckFloatingToggleButton",
         nseOpenAllButtonEnabled: "nseCheckOpenAllButton",
         nseOpenAllGoNextEnabled: "nseCheckOpenAllGoNext",
+        nseBackfillButtonEnabled: "nseCheckBackfillButton",
         nseCustomCSSEnabled: "nseCheckCustomCSS"
     };
 
@@ -2916,6 +3626,16 @@ function saveData() {
     GM_setValue("nseWhitelistColor", document.getElementById("nseWhitelistColor").value);
 
     GM_setValue("nseTimeout", Number(document.getElementById("nseTimeout").value));
+
+    nseBackfillPageLimit = Number(document.getElementById("nseBackfillPageLimit").value);
+    if(isNaN(nseBackfillPageLimit) || nseBackfillPageLimit < 1) {
+        nseBackfillPageLimit = 5;
+    } else if(nseBackfillPageLimit > 15) {
+        nseBackfillPageLimit = 15;
+    }
+    nseBackfillPageLimit = Math.floor(nseBackfillPageLimit);
+    GM_setValue("nseBackfillPageLimit", nseBackfillPageLimit);
+    document.getElementById("nseBackfillPageLimit").value = nseBackfillPageLimit;
 
     // We need to escape backslashes in the custom CSS as it will be included in a back-ticked CSS block
     let css = document.getElementById("nseCustomCSSArea").value;
@@ -3172,6 +3892,16 @@ a.nseLink, a.nseLink:visited {
 
 .nseNiceButton:hover, .nseRCMButton:hover {
     background-color: ${themes[nseSelectedTheme].backgroundHighlightColor} !important;
+}
+
+.nseDisabledButton {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.nseBackfilledPagerPage {
+    text-decoration: line-through !important;
+    opacity: 0.65;
 }
 
 .nseNiceButton, .nseRCMButton {
